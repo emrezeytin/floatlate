@@ -9,7 +9,7 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>local.floatlate</string>
+	<string>com.emrezeytin.floatlate</string>
 	<key>CFBundleName</key>
 	<string>Floatlate</string>
 	<key>CFBundlePackageType</key>
