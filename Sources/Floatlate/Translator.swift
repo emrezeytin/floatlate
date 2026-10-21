@@ -1,0 +1,283 @@
+import AppKit
+import AVFoundation
+import NaturalLanguage
+import Translation
+import UniformTypeIdentifiers
+
+@MainActor
+final class Translator: ObservableObject {
+    enum Status: Equatable {
+        case idle, reading, translating
+        case done(from: Locale.Language, to: Locale.Language)
+        case failed(String)
+    }
+
+    private enum Keys {
+        static let target = "target"
+        static let fallback = "fallback"
+        static let highQuality = "highQuality"
+    }
+
+    private struct Route: Equatable {
+        let source: Locale.Language?
+        let target: Locale.Language
+        let highQuality: Bool
+    }
+
+    @Published var input = "" {
+        didSet { if input != oldValue { scheduleTranslation() } }
+    }
+    @Published var source: Locale.Language? {
+        didSet { scheduleTranslation(after: .zero) }
+    }
+    @Published var target: Locale.Language {
+        didSet {
+            defaults.set(target.minimalIdentifier, forKey: Keys.target)
+            scheduleTranslation(after: .zero)
+        }
+    }
+    @Published var highQuality: Bool {
+        didSet {
+            defaults.set(highQuality, forKey: Keys.highQuality)
+            scheduleTranslation(after: .zero)
+        }
+    }
+    @Published private(set) var output = ""
+    @Published private(set) var status = Status.idle
+    @Published private(set) var detected: Locale.Language?
+    @Published private(set) var languages: [Locale.Language] = []
+    @Published private(set) var configuration: TranslationSession.Configuration?
+
+    private let defaults = UserDefaults.standard
+    private let speech = AVSpeechSynthesizer()
+    private var pending = ""
+    private var route: Route?
+    private var runID = 0
+    private var debounce: Task<Void, Never>?
+
+    private var fallback: Locale.Language? {
+        get { defaults.string(forKey: Keys.fallback).map(Locale.Language.init(identifier:)) }
+        set { defaults.set(newValue?.minimalIdentifier, forKey: Keys.fallback) }
+    }
+
+    init() {
+        let saved = UserDefaults.standard.string(forKey: Keys.target)
+        target = Locale.Language(identifier: saved ?? Locale.preferredLanguages.first ?? "en")
+        highQuality = UserDefaults.standard.bool(forKey: Keys.highQuality)
+    }
+
+    var activeTarget: Locale.Language {
+        configuration?.target ?? target
+    }
+
+    var showsResult: Bool {
+        !input.isEmpty || status != .idle
+    }
+
+    func name(of language: Locale.Language) -> String {
+        Locale.current.localizedString(forIdentifier: language.minimalIdentifier) ?? language.minimalIdentifier
+    }
+
+    func loadLanguages() async {
+        let supported = await LanguageAvailability().supportedLanguages
+        languages = supported.sorted { name(of: $0) < name(of: $1) }
+        if let match = languages.first(where: { $0.isSame(as: target) }), match != target {
+            target = match
+        }
+    }
+
+    func swapLanguages() {
+        guard case let .done(from, to) = status else { return }
+        let translated = output
+        source = to
+        target = languages.first(where: { $0.isSame(as: from) }) ?? from
+        input = translated
+    }
+
+    func clear() {
+        input = ""
+        source = nil
+    }
+
+    func copyOutput() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(output, forType: .string)
+    }
+
+    func speakOutput() {
+        speech.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: output)
+        utterance.voice = configuration?.target.flatMap { AVSpeechSynthesisVoice(language: $0.minimalIdentifier) }
+        speech.speak(utterance)
+    }
+
+    func pasteClipboard() {
+        let board = NSPasteboard.general
+        if let url = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])?.first as? URL {
+            Task { await ingest(file: url) }
+        } else if let text = board.string(forType: .string) {
+            translateNow(text)
+        } else if let image = NSImage(pasteboard: board) {
+            Task { await ingest(image: image) }
+        }
+    }
+
+    func ingest(_ providers: [NSItemProvider]) {
+        guard let provider = providers.first else { return }
+        Task { await ingest(provider) }
+    }
+
+    func ingest(file url: URL) async {
+        await read { try await TextExtractor.text(in: url) }
+    }
+
+    func ingest(image: NSImage) async {
+        await read { try await TextExtractor.text(in: image) }
+    }
+
+    func run(_ session: TranslationSession) async {
+        runID += 1
+        let id = runID
+        let text = pending
+        let lines = text.components(separatedBy: "\n")
+        var translated: [String?] = lines.map { $0.isBlank ? $0 : nil }
+        let requests = lines.indices.filter { translated[$0] == nil }.map {
+            TranslationSession.Request(sourceText: lines[$0], clientIdentifier: String($0))
+        }
+        var last: TranslationSession.Response?
+        do {
+            for try await response in session.translate(batch: requests) {
+                guard id == runID, text == pending else { return }
+                guard let index = response.clientIdentifier.flatMap(Int.init) else { continue }
+                translated[index] = response.targetText
+                output = translated.prefix { $0 != nil }.compactMap { $0 }.joined(separator: "\n")
+                last = response
+            }
+            guard id == runID, text == pending, let last else { return }
+            finish(from: last.sourceLanguage, to: last.targetLanguage)
+        } catch {
+            guard id == runID, text == pending, !Task.isCancelled else { return }
+            status = .failed(error.localizedDescription)
+        }
+    }
+
+    private func finish(from source: Locale.Language, to target: Locale.Language) {
+        status = .done(from: source, to: target)
+        if !source.isSame(as: self.target) { fallback = source }
+    }
+
+    private func translateNow(_ text: String) {
+        input = text
+        scheduleTranslation(after: .zero)
+    }
+
+    private func ingest(_ provider: NSItemProvider) async {
+        if let url = await provider.fileURL() {
+            await ingest(file: url)
+        } else if let image = await provider.object(NSImage.self) {
+            await ingest(image: image)
+        } else if let text = await provider.object(NSString.self) {
+            translateNow(text as String)
+        }
+    }
+
+    private func read(_ extract: () async throws -> String) async {
+        status = .reading
+        do {
+            let text = try await extract()
+            if text.isBlank {
+                status = .failed("No text found")
+            } else {
+                translateNow(text)
+            }
+        } catch {
+            status = .failed(error.localizedDescription)
+        }
+    }
+
+    private func scheduleTranslation(after delay: Duration = .milliseconds(450)) {
+        debounce?.cancel()
+        guard !input.isBlank else {
+            output = ""
+            detected = nil
+            status = .idle
+            return
+        }
+        debounce = Task {
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            requestTranslation()
+        }
+    }
+
+    private func requestTranslation() {
+        detected = detectLanguage(of: input)
+        let from = source ?? detected
+        let to = resolvedTarget(from: from)
+        output = ""
+        if let from, from.isSame(as: to) {
+            status = .failed("Already in \(name(of: to)). Pick another target.")
+            return
+        }
+        pending = input
+        status = .translating
+        let next = Route(source: from, target: to, highQuality: highQuality)
+        if next == route {
+            configuration?.invalidate()
+        } else {
+            route = next
+            configuration = makeConfiguration(for: next)
+        }
+    }
+
+    private func makeConfiguration(for route: Route) -> TranslationSession.Configuration {
+        guard #available(macOS 26.4, *) else {
+            return TranslationSession.Configuration(source: route.source, target: route.target)
+        }
+        let strategy: TranslationSession.Strategy = route.highQuality ? .highFidelity : .lowLatency
+        return TranslationSession.Configuration(source: route.source, target: route.target, preferredStrategy: strategy)
+    }
+
+    private func resolvedTarget(from source: Locale.Language?) -> Locale.Language {
+        guard let source, source.isSame(as: target), let fallback, !fallback.isSame(as: source) else { return target }
+        return fallback
+    }
+
+    private func detectLanguage(of text: String) -> Locale.Language? {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        guard let language = recognizer.dominantLanguage, language != .undetermined else { return nil }
+        return Locale.Language(identifier: language.rawValue)
+    }
+}
+
+extension Locale.Language {
+    func isSame(as other: Locale.Language) -> Bool {
+        languageCode == other.languageCode && maximalScript == other.maximalScript
+    }
+
+    private var maximalScript: Locale.Script? {
+        Locale.Language(identifier: maximalIdentifier).script
+    }
+}
+
+extension String {
+    var isBlank: Bool { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+}
+
+extension NSItemProvider {
+    func fileURL() async -> URL? {
+        guard hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+              let item = try? await loadItem(forTypeIdentifier: UTType.fileURL.identifier) else { return nil }
+        if let url = item as? URL { return url }
+        guard let data = item as? Data else { return nil }
+        return URL(dataRepresentation: data, relativeTo: nil)
+    }
+
+    func object<T: NSItemProviderReading>(_ type: T.Type) async -> T? {
+        guard canLoadObject(ofClass: type) else { return nil }
+        return await withCheckedContinuation { continuation in
+            _ = loadObject(ofClass: type) { object, _ in continuation.resume(returning: object as? T) }
+        }
+    }
+}
