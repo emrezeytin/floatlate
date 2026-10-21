@@ -2,6 +2,8 @@
 
 A floating translator for macOS. It stays on top of every app and Space, and lives in the menu bar.
 
+![Floatlate in light mode translating French to English, and in dark mode waiting for input](docs/screenshot.png)
+
 ## Input
 
 - Type or paste text.
@@ -55,6 +57,12 @@ To redraw the app icon after changing `Scripts/make-icon.swift`:
 
 ```bash
 swift Scripts/make-icon.swift Resources/AppIcon.icns
+```
+
+To redraw the README screenshot after a UI change:
+
+```bash
+./Scripts/make-screenshots.sh
 ```
 
 Requires macOS 15 or later.
