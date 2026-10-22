@@ -71,7 +71,7 @@ final class Translator: ObservableObject {
     }
 
     var showsResult: Bool {
-        !input.isEmpty || status != .idle
+        !input.isBlank || status != .idle
     }
 
     func name(of language: Locale.Language) -> String {
@@ -198,6 +198,7 @@ final class Translator: ObservableObject {
     private func scheduleTranslation(after delay: Duration = .milliseconds(450)) {
         debounce?.cancel()
         guard !input.isBlank else {
+            pending = ""
             output = ""
             detected = nil
             status = .idle

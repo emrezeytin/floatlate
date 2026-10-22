@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "Floatlate",
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "FloatlateTests",
+            dependencies: ["Floatlate"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

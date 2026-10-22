@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let qualityItem = NSMenuItem(title: "High-Quality Translation (Slower)", action: #selector(toggleHighQuality), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.mainMenu = MainMenu.make()
         panel = FloatingPanel(rootView: ContentView(translator: translator) { [weak self] in self?.captureScreen() })
         setUpStatusItem()
         registerHotKeys()
