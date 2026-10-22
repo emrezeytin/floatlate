@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 let sample = "Bonjour à tous ! La réunion de demain est déplacée à 15 h. Merci d'apporter vos notes sur le nouveau projet et vos idées pour le lancement."
-let windowSize = NSSize(width: 440, height: 540)
+let windowSize = NSSize(width: 400, height: 520)
 let margin: CGFloat = 64
 let cornerRadius: CGFloat = 16
 
@@ -15,7 +15,8 @@ func spin(_ seconds: Double) {
 func snapshot(_ appearance: NSAppearance.Name, text: String) -> NSImage {
     let translator = Translator()
     translator.highQuality = true
-    let panel = FloatingPanel(rootView: ContentView(translator: translator) {})
+    let panel = NSPanel(contentRect: NSRect(origin: .zero, size: windowSize), styleMask: [.borderless], backing: .buffered, defer: false)
+    panel.contentView = NSHostingView(rootView: ContentView(translator: translator) {}.background(.regularMaterial))
     panel.appearance = NSAppearance(named: appearance)
     panel.setFrame(NSRect(origin: NSPoint(x: -4000, y: -4000), size: windowSize), display: false)
     panel.orderFrontRegardless()

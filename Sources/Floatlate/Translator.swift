@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class Translator: ObservableObject {
     enum Status: Equatable {
-        case idle, reading, translating
+        case idle, reading, translating, stopped
         case done(from: Locale.Language, to: Locale.Language)
         case failed(String)
     }
@@ -22,6 +22,9 @@ final class Translator: ObservableObject {
         let source: Locale.Language?
         let target: Locale.Language
         let highQuality: Bool
+
+        @available(macOS 26.4, *)
+        var strategy: TranslationSession.Strategy { highQuality ? .highFidelity : .lowLatency }
     }
 
     @Published var input = "" {
@@ -42,11 +45,13 @@ final class Translator: ObservableObject {
             scheduleTranslation(after: .zero)
         }
     }
+    @Published private(set) var image: NSImage?
     @Published private(set) var output = ""
     @Published private(set) var status = Status.idle
     @Published private(set) var detected: Locale.Language?
     @Published private(set) var languages: [Locale.Language] = []
     @Published private(set) var configuration: TranslationSession.Configuration?
+    @Published private(set) var translationTarget: Locale.Language?
 
     private let defaults = UserDefaults.standard
     private let speech = AVSpeechSynthesizer()
@@ -54,6 +59,7 @@ final class Translator: ObservableObject {
     private var route: Route?
     private var runID = 0
     private var debounce: Task<Void, Never>?
+    private var job: Task<Void, Never>?
 
     private var fallback: Locale.Language? {
         get { defaults.string(forKey: Keys.fallback).map(Locale.Language.init(identifier:)) }
@@ -67,7 +73,11 @@ final class Translator: ObservableObject {
     }
 
     var activeTarget: Locale.Language {
-        configuration?.target ?? target
+        translationTarget ?? target
+    }
+
+    var isBusy: Bool {
+        status == .reading || status == .translating
     }
 
     var showsResult: Bool {
@@ -95,8 +105,20 @@ final class Translator: ObservableObject {
     }
 
     func clear() {
+        image = nil
         input = ""
         source = nil
+    }
+
+    func retry() {
+        scheduleTranslation(after: .zero)
+    }
+
+    func stop() {
+        job?.cancel()
+        runID += 1
+        dismissPresentedSession()
+        status = .stopped
     }
 
     func copyOutput() {
@@ -107,16 +129,19 @@ final class Translator: ObservableObject {
     func speakOutput() {
         speech.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: output)
-        utterance.voice = configuration?.target.flatMap { AVSpeechSynthesisVoice(language: $0.minimalIdentifier) }
+        utterance.voice = AVSpeechSynthesisVoice(language: activeTarget.minimalIdentifier)
         speech.speak(utterance)
     }
 
     func pasteClipboard() {
-        let board = NSPasteboard.general
+        ingest(pasteboard: .general)
+    }
+
+    func ingest(pasteboard board: NSPasteboard) {
         if let url = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])?.first as? URL {
             Task { await ingest(file: url) }
         } else if let text = board.string(forType: .string) {
-            translateNow(text)
+            ingest(text: text)
         } else if let image = NSImage(pasteboard: board) {
             Task { await ingest(image: image) }
         }
@@ -128,10 +153,12 @@ final class Translator: ObservableObject {
     }
 
     func ingest(file url: URL) async {
+        image = await TextExtractor.preview(of: url)
         await read { try await TextExtractor.text(in: url) }
     }
 
     func ingest(image: NSImage) async {
+        self.image = image
         await read { try await TextExtractor.text(in: image) }
     }
 
@@ -159,6 +186,7 @@ final class Translator: ObservableObject {
             guard id == runID, text == pending, !Task.isCancelled else { return }
             status = .failed(error.localizedDescription)
         }
+        dismissPresentedSession()
     }
 
     private func finish(from source: Locale.Language, to target: Locale.Language) {
@@ -171,13 +199,18 @@ final class Translator: ObservableObject {
         scheduleTranslation(after: .zero)
     }
 
+    private func ingest(text: String) {
+        image = nil
+        translateNow(text)
+    }
+
     private func ingest(_ provider: NSItemProvider) async {
         if let url = await provider.fileURL() {
             await ingest(file: url)
         } else if let image = await provider.object(NSImage.self) {
             await ingest(image: image)
         } else if let text = await provider.object(NSString.self) {
-            translateNow(text as String)
+            ingest(text: text as String)
         }
     }
 
@@ -185,12 +218,14 @@ final class Translator: ObservableObject {
         status = .reading
         do {
             let text = try await extract()
+            guard status == .reading else { return }
             if text.isBlank {
                 status = .failed("No text found")
             } else {
                 translateNow(text)
             }
         } catch {
+            guard status == .reading else { return }
             status = .failed(error.localizedDescription)
         }
     }
@@ -198,6 +233,7 @@ final class Translator: ObservableObject {
     private func scheduleTranslation(after delay: Duration = .milliseconds(450)) {
         debounce?.cancel()
         guard !input.isBlank else {
+            job?.cancel()
             pending = ""
             output = ""
             detected = nil
@@ -222,7 +258,35 @@ final class Translator: ObservableObject {
         }
         pending = input
         status = .translating
+        translationTarget = to
         let next = Route(source: from, target: to, highQuality: highQuality)
+        job?.cancel()
+        job = Task { await translate(along: next) }
+    }
+
+    private func translate(along next: Route) async {
+        let session = await installedSession(for: next)
+        guard !Task.isCancelled else { return }
+        guard let session else { return present(next) }
+        dismissPresentedSession()
+        await run(session)
+    }
+
+    private func installedSession(for route: Route) async -> TranslationSession? {
+        guard let source = route.source else { return nil }
+        if #available(macOS 26.4, *) {
+            let availability = LanguageAvailability(preferredStrategy: route.strategy)
+            guard await availability.status(from: source, to: route.target) == .installed else { return nil }
+            return TranslationSession(installedSource: source, target: route.target, preferredStrategy: route.strategy)
+        }
+        if #available(macOS 26.0, *) {
+            guard await LanguageAvailability().status(from: source, to: route.target) == .installed else { return nil }
+            return TranslationSession(installedSource: source, target: route.target)
+        }
+        return nil
+    }
+
+    private func present(_ next: Route) {
         if next == route {
             configuration?.invalidate()
         } else {
@@ -231,12 +295,16 @@ final class Translator: ObservableObject {
         }
     }
 
+    private func dismissPresentedSession() {
+        configuration = nil
+        route = nil
+    }
+
     private func makeConfiguration(for route: Route) -> TranslationSession.Configuration {
         guard #available(macOS 26.4, *) else {
             return TranslationSession.Configuration(source: route.source, target: route.target)
         }
-        let strategy: TranslationSession.Strategy = route.highQuality ? .highFidelity : .lowLatency
-        return TranslationSession.Configuration(source: route.source, target: route.target, preferredStrategy: strategy)
+        return TranslationSession.Configuration(source: route.source, target: route.target, preferredStrategy: route.strategy)
     }
 
     private func resolvedTarget(from source: Locale.Language?) -> Locale.Language {

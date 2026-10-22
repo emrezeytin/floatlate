@@ -34,6 +34,13 @@ enum TextExtractor {
         return try NSAttributedString(url: url, options: [:], documentAttributes: nil).string
     }
 
+    static func preview(of url: URL) async -> NSImage? {
+        let type = UTType(filenameExtension: url.pathExtension) ?? .data
+        if type.conforms(to: .image) { return NSImage(contentsOf: url) }
+        guard type.conforms(to: .pdf), let page = PDFDocument(url: url)?.page(at: 0) else { return nil }
+        return render(page)
+    }
+
     private static func text(in cgImage: CGImage) async throws -> String {
         var request = RecognizeTextRequest()
         request.recognitionLevel = .accurate

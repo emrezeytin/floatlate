@@ -1,6 +1,6 @@
 # Floatlate
 
-A floating translator for macOS. It stays on top of every app and Space, and lives in the menu bar.
+A menu bar translator for macOS. Click the menu bar icon or press ⌃⌥T to open it. Right-click the icon for settings.
 
 ![Floatlate in light mode translating French to English, and in dark mode waiting for input](docs/screenshot.png)
 
@@ -14,26 +14,29 @@ Requires macOS 15 or later.
 
 - Type or paste text.
 - Paste anything with ⇧⌘V: text, an image, or a copied file.
-- Drop text, images, PDFs, or documents (.txt, .rtf, .docx, .html) on the window.
+- Drop text, images, PDFs, or documents (.txt, .rtf, .docx, .html) on the menu bar icon.
 - Press ⌃⌥S anywhere, then drag over part of the screen. Floatlate reads the text and translates it.
+- While Floatlate reads an image, it shows the image. After that, a thumbnail stays above the text. Click it to enlarge it.
 
 ## Shortcuts
 
 | Keys | Action |
 | --- | --- |
-| ⌃⌥T | Show or hide the window |
+| ⌃⌥T | Open or close Floatlate |
 | ⌃⌥S | Capture text from the screen |
 | ⇧⌘V | Paste text, image, or file |
 | ⌘O | Open a file |
 | ⇧⌘C | Copy the translation |
 | ⌘K | Clear |
-| Esc | Hide |
+| ⌘. | Stop translating |
+| Esc | Close |
 
 ## How it works
 
 - Apple's Translation framework translates on the device. No account, no API key.
 - Vision reads text from images and scanned PDFs.
 - Lines show as soon as each one is translated.
+- On macOS 26 or later, translation keeps going after you close Floatlate. Click the stop button or press ⌘. to cancel it.
 - If the text is already in your target language, Floatlate translates it into the last language you translated from.
 
 ## Speed and quality
@@ -41,13 +44,17 @@ Requires macOS 15 or later.
 Floatlate uses Apple's fast translation model by default.
 
 - The first time you translate between two languages, macOS asks to download that pair. Approve it once.
-- For better but slower results, choose **High-Quality Translation (Slower)** in the menu bar menu. It takes about 0.7 seconds per line.
+- Keep the download sheet open until the download ends. If you close it early, wait a moment, then click **Try Again**.
+- The fast and high-quality models download separately.
+- For better but slower results, right-click the menu bar icon and choose **High-Quality Translation (Slower)**. It takes about 0.7 seconds per line.
 - The high-quality option needs macOS 26.4 or later. Older systems use Apple's default model.
 
 ## Permissions
 
 - The first ⌃⌥S asks for Screen Recording access. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording.
-- A local build is self-signed, so macOS may ask again after each rebuild. Release builds keep the permission.
+- If Floatlate is not in that list, click **+** and add it.
+- A plain `./build.sh` build is ad-hoc signed. macOS ties the permission to that exact binary, so it asks again after each rebuild.
+- Build with `SIGN_IDENTITY="Developer ID Application"` to keep the permission across rebuilds. Release builds keep it too.
 
 ## Build
 

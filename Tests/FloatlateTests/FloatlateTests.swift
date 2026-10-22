@@ -34,18 +34,17 @@ struct FloatlateTests {
         guard #available(macOS 26.4, *) else { return }
         let french = Locale.Language(identifier: "fr")
         let english = Locale.Language(identifier: "en")
-        guard await LanguageAvailability().status(from: french, to: english) == .installed else { return }
+        guard await LanguageAvailability(preferredStrategy: .highFidelity).status(from: french, to: english) == .installed else { return }
 
         let translator = Translator()
+        translator.highQuality = true
+        translator.target = english
         translator.input = (1...40).map { "Ceci est la phrase numéro \($0) d'un long document." }.joined(separator: "\n")
-        try await waitUntil { translator.status == .translating }
-        let session = TranslationSession(installedSource: french, target: english, preferredStrategy: .highFidelity)
-        let run = Task { await translator.run(session) }
         try await waitUntil { !translator.output.isEmpty }
         try #require(translator.status == .translating)
 
         translator.clear()
-        await run.value
+        try await Task.sleep(for: .seconds(2))
         #expect(translator.output.isEmpty)
         #expect(translator.status == .idle)
     }
